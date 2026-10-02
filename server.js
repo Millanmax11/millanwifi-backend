@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 // CONFIGURATION
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_live_e9c194bde9f9d170a30afb08005ab97c2017fd40';
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MIKROTIK_REST_URL = 'http://mikrofig.com/rest/ip/hotspot/user';
 const MIKROTIK_AUTH = 'Basic bWlrcm9iaWxsX2JpbGxpbmc6NDI2YWEwMDE4YzM5ZDRkOWM2MDE4NzgwMjYxYmY1ZDU0Yjk5';
 
