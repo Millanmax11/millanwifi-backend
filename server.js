@@ -8,7 +8,7 @@ app.use(express.json());
 // CONFIGURATION
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MIKROTIK_REST_URL = 'http://mikrofig.com/rest/ip/hotspot/user';
-const MIKROTIK_AUTH = 'Basic bWlrcm9iaWxsX2JpbGxpbmc6NDI2YWEwMDE4YzM5ZDRkOWM2MDE4NzgwMjYxYmY1ZDU0Yjk5';
+const MIKROTIK_AUTH = process.env.MIKROTIK_AUTH; // Basic Auth: 'Basic base
 
 // Map package names or metadata to MikroTik limit-uptime
 const PACKAGE_UPTIME_MAP = {
