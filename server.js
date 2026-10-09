@@ -178,22 +178,29 @@ app.get('/api/check-status', async (req, res) => {
 });
 
 // ==========================================
+// ==========================================
 // 4. PAYSTACK WEBHOOK
 // ==========================================
 app.post('/api/paystack-webhook', async (req, res) => {
   try {
     const signature = req.headers['x-paystack-signature'];
     
-    const hash = crypto
-      .createHmac('sha512', PAYSTACK_SECRET_KEY || '')
-      .update(req.rawBody)
-      .digest('hex');
+    // Fallback if req.rawBody wasn't populated by middleware
+    const rawData = req.rawBody || JSON.stringify(req.body);
 
-    if (PAYSTACK_SECRET_KEY && hash !== signature && process.env.NODE_ENV === 'production') {
-      return res.status(401).send('Invalid signature');
+    if (PAYSTACK_SECRET_KEY) {
+      const hash = crypto
+        .createHmac('sha512', PAYSTACK_SECRET_KEY)
+        .update(rawData)
+        .digest('hex');
+
+      if (hash !== signature && process.env.NODE_ENV === 'production') {
+        console.warn('⚠️ Webhook Signature Mismatch');
+        return res.status(401).send('Invalid signature');
+      }
     }
 
-    const { event, data } = req.body;
+    const { event, data } = req.body || {};
 
     if (event === 'charge.success') {
       const reference = data.reference;
@@ -215,7 +222,7 @@ app.post('/api/paystack-webhook', async (req, res) => {
       const generatedPassword = 'pass_' + Math.floor(1000 + Math.random() * 9000);
       const limitUptime = PACKAGE_UPTIME_MAP[packageName] || '24h';
 
-      // 1. Attempt Hotspot User Creation (Graceful error handling for cloud unreachable router IP)
+      // 1. Attempt Hotspot User Creation
       let routerProvisioned = false;
       try {
         await createHotspotUser(reference, generatedPassword, 'default', limitUptime);
@@ -224,7 +231,7 @@ app.post('/api/paystack-webhook', async (req, res) => {
         console.error(`⚠️ Router API call failed (${routerErr.message}). Recording transaction to Firestore anyway...`);
       }
 
-      // 2. Save transaction to Firestore ('transactions' collection)
+      // 2. Save transaction to Firestore
       await db.collection('transactions').doc(reference).set({
         routerId: routerId,
         reference: reference,
@@ -238,6 +245,7 @@ app.post('/api/paystack-webhook', async (req, res) => {
         createdAt: FieldValue.serverTimestamp()
       });
 
+      console.log(`✅ Transaction ${reference} recorded in Firestore!`);
       return res.status(200).json({ status: true, message: 'User provisioned and transaction recorded' });
     }
 
