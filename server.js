@@ -1,7 +1,8 @@
 require('dotenv').config();
 
 const express = require('express');
-const admin = require('firebase-admin');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const cors = require('cors');
 const crypto = require('crypto');
 const axios = require('axios');
@@ -44,32 +45,34 @@ const PACKAGE_UPTIME_MAP = {
 let serviceAccount;
 
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-  // Production (e.g. Render): Read JSON string from env variable
   try {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log('✅ Loaded Firebase credentials from FIREBASE_SERVICE_ACCOUNT env var.');
   } catch (err) {
-    console.error('❌ Error parsing FIREBASE_SERVICE_ACCOUNT environment variable:', err.message);
+    console.error('❌ Error parsing FIREBASE_SERVICE_ACCOUNT env variable:', err.message);
   }
 } else {
-  // Local Development: Fallback to local serviceAccountKey.json
   try {
     serviceAccount = require('./serviceAccountKey.json');
+    console.log('✅ Loaded local serviceAccountKey.json file.');
   } catch (err) {
-    console.warn('⚠️ Local serviceAccountKey.json not found.');
+    console.warn('⚠️ Local serviceAccountKey.json not found in backend directory.');
   }
 }
 
-if (serviceAccount) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
-  console.log('✅ Connected to Firebase Cloud Firestore');
-} else {
-  admin.initializeApp(); // Fallback to default application credentials
-  console.log('✅ Initialized default Firebase App');
+if (!getApps().length) {
+  if (serviceAccount) {
+    initializeApp({
+      credential: cert(serviceAccount)
+    });
+    console.log('✅ Initialized Firebase Admin SDK with Cert.');
+  } else {
+    initializeApp();
+    console.log('✅ Initialized Default Firebase Application.');
+  }
 }
 
-const db = admin.firestore();
+const db = getFirestore();
 
 // ==========================================
 // 3. PUBLIC ROUTES (For package.html)
@@ -212,8 +215,14 @@ app.post('/api/paystack-webhook', async (req, res) => {
       const generatedPassword = 'pass_' + Math.floor(1000 + Math.random() * 9000);
       const limitUptime = PACKAGE_UPTIME_MAP[packageName] || '24h';
 
-      // 1. Create Hotspot User on Real MikroTik Router
-      await createHotspotUser(reference, generatedPassword, 'default', limitUptime);
+      // 1. Attempt Hotspot User Creation (Graceful error handling for cloud unreachable router IP)
+      let routerProvisioned = false;
+      try {
+        await createHotspotUser(reference, generatedPassword, 'default', limitUptime);
+        routerProvisioned = true;
+      } catch (routerErr) {
+        console.error(`⚠️ Router API call failed (${routerErr.message}). Recording transaction to Firestore anyway...`);
+      }
 
       // 2. Save transaction to Firestore ('transactions' collection)
       await db.collection('transactions').doc(reference).set({
@@ -225,7 +234,8 @@ app.post('/api/paystack-webhook', async (req, res) => {
         hotspotUsername: reference,
         hotspotPassword: generatedPassword,
         status: 'success',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        routerProvisioned: routerProvisioned,
+        createdAt: FieldValue.serverTimestamp()
       });
 
       return res.status(200).json({ status: true, message: 'User provisioned and transaction recorded' });
@@ -323,7 +333,7 @@ async function createHotspotUser(username, password, profile, limitUptime) {
 
     // If user already exists on MikroTik, treat as success
     if (typeof errorDetail === 'string' && errorDetail.toLowerCase().includes('already have user')) {
-      console.log(`ℹ️ Hotspot user '${username}' already exists on MikroTik. Proceeding with authentication...`);
+      console.log(`ℹ️ Hotspot user '${username}' already exists on MikroTik. Proceeding...`);
       return { status: 'already_exists', name: username };
     }
 
