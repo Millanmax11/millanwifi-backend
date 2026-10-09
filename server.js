@@ -260,28 +260,45 @@ app.post('/api/paystack-webhook', async (req, res) => {
 // 5. DASHBOARD STATISTICS API (Firestore)
 // ==========================================
 
-// 1. Fetch Transaction History
+// ==========================================
+// 5. FETCH ALL FIRESTORE TRANSACTIONS
+// ==========================================
 app.get('/api/transactions', async (req, res) => {
   try {
     const snapshot = await db.collection('transactions')
-      .where('status', '==', 'success')
       .orderBy('createdAt', 'desc')
-      .limit(50)
       .get();
 
-    const transactions = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-      createdAt: doc.data().createdAt?.toDate ? doc.data().createdAt.toDate() : doc.data().createdAt
-    }));
+    const transactions = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      
+      // Convert Firestore Timestamp to clean ISO String
+      let createdAtIso = new Date().toISOString();
+      if (data.createdAt) {
+        if (typeof data.createdAt.toDate === 'function') {
+          createdAtIso = data.createdAt.toDate().toISOString();
+        } else if (data.createdAt._seconds) {
+          createdAtIso = new Date(data.createdAt._seconds * 1000).toISOString();
+        } else {
+          createdAtIso = new Date(data.createdAt).toISOString();
+        }
+      }
 
-    res.status(200).json({
-      success: true,
-      data: transactions
+      transactions.push({
+        id: doc.id,
+        reference: data.reference || doc.id,
+        amount: data.amount || 0,
+        packageName: data.packageName || '24 HOURS UNLIMITED',
+        status: data.status || 'success',
+        createdAt: createdAtIso
+      });
     });
+
+    return res.json({ success: true, data: transactions });
   } catch (error) {
-    console.error('Error fetching transactions:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch transactions' });
+    console.error('Error fetching transactions:', error.message);
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
