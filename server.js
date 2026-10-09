@@ -25,7 +25,7 @@ app.use(express.json({
 }));
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const MIKROTIK_REST_URL = process.env.MIKROTIK_REST_URL || 'http://192.168.88.1/rest/ip/hotspot/user';
+const MIKROTIK_REST_URL = process.env.MIKROTIK_REST_URL || 'http://192.24.88.1/rest/ip/hotspot/user';
 const MIKROTIK_AUTH = process.env.MIKROTIK_AUTH;
 const JWT_SECRET = process.env.JWT_SECRET || 'millanwifi_admin_secret_key';
 const ADMIN_SECRET_KEY = process.env.ADMIN_SECRET_KEY || 'supersecret123';
