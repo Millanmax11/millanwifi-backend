@@ -232,6 +232,9 @@ app.post('/api/paystack-webhook', async (req, res) => {
       }
 
       // 2. Save transaction to Firestore
+      // Inside your Paystack Webhook or test route:
+      const now = new Date();
+
       await db.collection('transactions').doc(reference).set({
         routerId: routerId,
         reference: reference,
@@ -242,7 +245,8 @@ app.post('/api/paystack-webhook', async (req, res) => {
         hotspotPassword: generatedPassword,
         status: 'success',
         routerProvisioned: routerProvisioned,
-        createdAt: FieldValue.serverTimestamp()
+        createdAt: now.toISOString(),          // 👈 Standard ISO string (Foolproof for frontend)
+        createdAtTimestamp: FieldValue.serverTimestamp() // 👈 Kept for database sorting if needed
       });
 
       console.log(`✅ Transaction ${reference} recorded in Firestore!`);
@@ -272,26 +276,13 @@ app.get('/api/transactions', async (req, res) => {
     const transactions = [];
     snapshot.forEach(doc => {
       const data = doc.data();
-      
-      // Convert Firestore Timestamp to clean ISO String
-      let createdAtIso = new Date().toISOString();
-      if (data.createdAt) {
-        if (typeof data.createdAt.toDate === 'function') {
-          createdAtIso = data.createdAt.toDate().toISOString();
-        } else if (data.createdAt._seconds) {
-          createdAtIso = new Date(data.createdAt._seconds * 1000).toISOString();
-        } else {
-          createdAtIso = new Date(data.createdAt).toISOString();
-        }
-      }
-
       transactions.push({
         id: doc.id,
         reference: data.reference || doc.id,
         amount: data.amount || 0,
         packageName: data.packageName || '24 HOURS UNLIMITED',
         status: data.status || 'success',
-        createdAt: createdAtIso
+        createdAt: data.createdAt || new Date().toISOString()
       });
     });
 
