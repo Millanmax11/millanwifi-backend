@@ -25,8 +25,6 @@ app.use(express.json({
 }));
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const MIKROTIK_REST_URL = process.env.MIKROTIK_REST_URL || 'http://192.24.88.1/rest/ip/hotspot/user';
-const MIKROTIK_AUTH = process.env.MIKROTIK_AUTH;
 const JWT_SECRET = process.env.JWT_SECRET || 'millanwifi_admin_secret_key';
 const ADMIN_SECRET_KEY = process.env.ADMIN_SECRET_KEY || 'supersecret123';
 
@@ -75,6 +73,25 @@ if (!getApps().length) {
 const db = getFirestore();
 
 // ==========================================
+// DYNAMIC MULTI-ROUTER HELPER
+// ==========================================
+async function getRouterConfig(routerId) {
+  if (!routerId) {
+    throw new Error("No router ID provided.");
+  }
+  const routerDoc = await db.collection('routers').doc(routerId).get();
+  if (!routerDoc.exists) {
+    // Fallback: try searching by routerId field if doc ID differs
+    const snap = await db.collection('routers').where('routerId', '==', routerId).limit(1).get();
+    if (snap.empty) {
+      throw new Error(`Router configuration for '${routerId}' not found in database.`);
+    }
+    return snap.docs[0].data();
+  }
+  return routerDoc.data();
+}
+
+// ==========================================
 // 3. PUBLIC ROUTES (For package.html)
 // ==========================================
 
@@ -86,22 +103,18 @@ app.get('/api/portal-config', async (req, res) => {
     res.setHeader('Expires', '0');
 
     const { routerId } = req.query;
-
     let configDoc = null;
 
-    // 1. Search by requested routerId
     if (routerId) {
       const snap = await db.collection('routers').where('routerId', '==', routerId).limit(1).get();
       if (!snap.empty) configDoc = snap.docs[0].data();
     }
 
-    // 2. Fallback to 'default'
     if (!configDoc) {
       const snap = await db.collection('routers').where('routerId', '==', 'default').limit(1).get();
       if (!snap.empty) configDoc = snap.docs[0].data();
     }
 
-    // 3. Fallback to first document in routers collection
     if (!configDoc) {
       const snap = await db.collection('routers').limit(1).get();
       if (!snap.empty) configDoc = snap.docs[0].data();
@@ -113,7 +126,6 @@ app.get('/api/portal-config', async (req, res) => {
       });
     }
 
-    // Check subscription expiration date
     const endDate = configDoc.subscriptionEndDate?.toDate 
       ? configDoc.subscriptionEndDate.toDate() 
       : new Date(configDoc.subscriptionEndDate);
@@ -149,7 +161,6 @@ app.get('/api/check-status', async (req, res) => {
   const username = reference.replace(/[^A-Za-z0-9_-]/g, '');
 
   try {
-    // 1. Check Firestore transaction record first
     const txDoc = await db.collection('transactions').doc(reference).get();
     if (txDoc.exists && txDoc.data().status === 'success') {
       const data = txDoc.data();
@@ -160,9 +171,20 @@ app.get('/api/check-status', async (req, res) => {
       });
     }
 
-    // 2. Fallback: Query MikroTik REST API directly
-    const response = await axios.get(`${MIKROTIK_REST_URL}?name=${encodeURIComponent(username)}`, {
-      headers: { 'Authorization': MIKROTIK_AUTH },
+    // Dynamic router lookup for fallback check
+    const routerId = req.query.routerId || 'kisumu_cbd_01';
+    let routerConfig;
+    try {
+      routerConfig = await getRouterConfig(routerId);
+    } catch {
+      return res.json({ ready: false });
+    }
+
+    const baseUrl = routerConfig.ipOrDomain || '192.24.88.1';
+    const authHeader = 'Basic ' + Buffer.from(`${routerConfig.username || 'admin'}:${routerConfig.password || ''}`).toString('base64');
+
+    const response = await axios.get(`http://${baseUrl}/rest/ip/hotspot/user?name=${encodeURIComponent(username)}`, {
+      headers: { 'Authorization': authHeader },
       timeout: 5000
     });
 
@@ -178,14 +200,11 @@ app.get('/api/check-status', async (req, res) => {
 });
 
 // ==========================================
-// ==========================================
 // 4. PAYSTACK WEBHOOK
 // ==========================================
 app.post('/api/paystack-webhook', async (req, res) => {
   try {
     const signature = req.headers['x-paystack-signature'];
-    
-    // Fallback if req.rawBody wasn't populated by middleware
     const rawData = req.rawBody || JSON.stringify(req.body);
 
     if (PAYSTACK_SECRET_KEY) {
@@ -217,22 +236,21 @@ app.post('/api/paystack-webhook', async (req, res) => {
 
       const routerId = data.metadata?.routerId || 'kisumu_cbd_01';
 
-      console.log(`Processing payment ref: ${reference} for package: ${packageName}`);
+      console.log(`Processing payment ref: ${reference} for router: ${routerId}, package: ${packageName}`);
 
       const generatedPassword = 'pass_' + Math.floor(1000 + Math.random() * 9000);
       const limitUptime = PACKAGE_UPTIME_MAP[packageName] || '24h';
 
-      // 1. Attempt Hotspot User Creation
+      // 1. Attempt Hotspot User Creation dynamically
       let routerProvisioned = false;
       try {
-        await createHotspotUser(reference, generatedPassword, 'default', limitUptime);
+        await createHotspotUserOnRouter(routerId, reference, generatedPassword, 'default', limitUptime);
         routerProvisioned = true;
       } catch (routerErr) {
         console.error(`⚠️ Router API call failed (${routerErr.message}). Recording transaction to Firestore anyway...`);
       }
 
       // 2. Save transaction to Firestore
-      // Inside your Paystack Webhook or test route:
       const now = new Date();
 
       await db.collection('transactions').doc(reference).set({
@@ -245,11 +263,11 @@ app.post('/api/paystack-webhook', async (req, res) => {
         hotspotPassword: generatedPassword,
         status: 'success',
         routerProvisioned: routerProvisioned,
-        createdAt: now.toISOString(),          // 👈 Standard ISO string (Foolproof for frontend)
-        createdAtTimestamp: FieldValue.serverTimestamp() // 👈 Kept for database sorting if needed
+        createdAt: now.toISOString(),
+        createdAtTimestamp: FieldValue.serverTimestamp()
       });
 
-      console.log(`✅ Transaction ${reference} recorded in Firestore!`);
+      console.log(`✅ Transaction ${reference} recorded in Firestore for ${routerId}!`);
       return res.status(200).json({ status: true, message: 'User provisioned and transaction recorded' });
     }
 
@@ -260,71 +278,14 @@ app.post('/api/paystack-webhook', async (req, res) => {
   }
 });
 
-// ==========================================
-// 5. DASHBOARD STATISTICS API (Firestore)
-// ==========================================
+// Dynamic Helper: Create Hotspot User on Target MikroTik Router
+async function createHotspotUserOnRouter(routerId, username, password, profile, limitUptime) {
+  const routerConfig = await getRouterConfig(routerId);
+  const baseUrl = routerConfig.ipOrDomain;
+  const authHeader = 'Basic ' + Buffer.from(`${routerConfig.username}:${routerConfig.password}`).toString('base64');
+  const endpointUrl = `http://${baseUrl}/rest/ip/hotspot/user/add`;
 
-// ==========================================
-// 5. FETCH ALL FIRESTORE TRANSACTIONS
-// ==========================================
-app.get('/api/transactions', async (req, res) => {
   try {
-    const snapshot = await db.collection('transactions')
-      .orderBy('createdAt', 'desc')
-      .get();
-
-    const transactions = [];
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      transactions.push({
-        id: doc.id,
-        reference: data.reference || doc.id,
-        amount: data.amount || 0,
-        packageName: data.packageName || '24 HOURS UNLIMITED',
-        status: data.status || 'success',
-        createdAt: data.createdAt || new Date().toISOString()
-      });
-    });
-
-    return res.json({ success: true, data: transactions });
-  } catch (error) {
-    console.error('Error fetching transactions:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// 2. Fetch Revenue Stats for Charts
-app.get('/api/revenue-stats', async (req, res) => {
-  try {
-    const snapshot = await db.collection('transactions')
-      .where('status', '==', 'success')
-      .get();
-
-    let totalRevenue = 0;
-    snapshot.forEach(doc => {
-      totalRevenue += (doc.data().amount || 0);
-    });
-
-    res.status(200).json({
-      success: true,
-      data: {
-        totalRevenue,
-        transactionCount: snapshot.size
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching revenue stats:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch revenue statistics' });
-  }
-});
-
-// Global Helper: Create Hotspot User on Real Router
-async function createHotspotUser(username, password, profile, limitUptime) {
-  try {
-    const endpointUrl = MIKROTIK_REST_URL.endsWith('/add') 
-      ? MIKROTIK_REST_URL 
-      : `${MIKROTIK_REST_URL.replace(/\/$/, '')}/add`;
-
     const response = await axios.post(
       endpointUrl,
       {
@@ -332,37 +293,32 @@ async function createHotspotUser(username, password, profile, limitUptime) {
         password: password,
         profile: profile,
         'limit-uptime': limitUptime,
-        comment: 'MILLANWIFI - Paystack'
+        comment: `MILLANWIFI - ${routerId}`
       },
       {
         headers: { 
-          'Authorization': MIKROTIK_AUTH,
+          'Authorization': authHeader,
           'Content-Type': 'application/json'
         },
-        timeout: 15000 // 15 second timeout for slower router connections
+        timeout: 15000
       }
     );
-
     return response.data;
   } catch (error) {
     const errorDetail = error.response?.data?.detail || error.response?.data?.message || '';
-
-    // If user already exists on MikroTik, treat as success
     if (typeof errorDetail === 'string' && errorDetail.toLowerCase().includes('already have user')) {
-      console.log(`ℹ️ Hotspot user '${username}' already exists on MikroTik. Proceeding...`);
+      console.log(`ℹ️ Hotspot user '${username}' already exists on router ${routerId}. Proceeding...`);
       return { status: 'already_exists', name: username };
     }
-
-    console.error("Router API Error:", error.response?.data || error.message);
+    console.error(`Router API Error for ${routerId}:`, error.response?.data || error.message);
     throw error;
   }
 }
 
 // ==========================================
-// 6. ADMIN LOGIN & MANAGEMENT (Firestore)
+// 5. AUTHENTICATION & MIDDLEWARE
 // ==========================================
 
-// --- AUTH MIDDLEWARE ---
 const verifyAdmin = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(403).json({ error: 'Access denied. No token provided.' });
@@ -376,7 +332,7 @@ const verifyAdmin = (req, res, next) => {
   }
 };
 
-// --- ADMIN LOGIN ENDPOINT ---
+// ADMIN LOGIN ENDPOINT
 app.post('/api/admin/login', async (req, res) => {
   const { username, password } = req.body;
   try {
@@ -402,7 +358,133 @@ app.post('/api/admin/login', async (req, res) => {
   }
 });
 
-// --- DASHBOARD STATS ENDPOINT (Isolated by routerId) ---
+// ==========================================
+// 6. PROTECTED DASHBOARD & ROUTER PROXY API
+// ==========================================
+
+// 1. Fetch Firestore Transactions (Scoped by Admin Token)
+// 1. Fetch Transactions (Scoped strictly to the logged-in admin's routerId)
+app.get('/api/transactions', verifyAdmin, async (req, res) => {
+  try {
+    const routerId = req.admin.routerId; // Extracted safely from JWT token
+
+    const snapshot = await db.collection('transactions')
+      .where('routerId', '==', routerId) // 👈 Filter transactions by routerId
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const transactions = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      transactions.push({
+        id: doc.id,
+        reference: data.reference || doc.id,
+        amount: data.amount || 0,
+        packageName: data.packageName || '24 HOURS UNLIMITED',
+        status: data.status || 'success',
+        createdAt: data.createdAt || new Date().toISOString()
+      });
+    });
+
+    return res.json({ success: true, data: transactions });
+  } catch (error) {
+    console.error(`Error fetching transactions for ${req.admin?.routerId}:`, error.message);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 2. Fetch Revenue Stats (Scoped strictly to the logged-in admin's routerId)
+app.get('/api/revenue-stats', verifyAdmin, async (req, res) => {
+  try {
+    const routerId = req.admin.routerId;
+
+    const snapshot = await db.collection('transactions')
+      .where('status', '==', 'success')
+      .where('routerId', '==', routerId) // 👈 Filter revenue by routerId
+      .get();
+
+    let totalRevenue = 0;
+    snapshot.forEach(doc => {
+      totalRevenue += Number(doc.data().amount || 0);
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        totalRevenue,
+        transactionCount: snapshot.size
+      }
+    });
+  } catch (error) {
+    console.error(`Error fetching revenue stats for ${req.admin?.routerId}:`, error);
+    res.status(500).json({ success: false, message: 'Failed to fetch revenue statistics' });
+  }
+});
+
+// 3. Fetch Live Hotspot Users from Router (Scoped by Admin Token)
+app.get('/api/router/users', verifyAdmin, async (req, res) => {
+  try {
+    const routerId = req.admin.routerId;
+    const config = await getRouterConfig(routerId);
+
+    const baseUrl = config.ipOrDomain;
+    const authHeader = 'Basic ' + Buffer.from(`${config.username}:${config.password}`).toString('base64');
+
+    const response = await axios.get(`http://${baseUrl}/rest/ip/hotspot/user`, {
+      headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+      timeout: 5000
+    });
+
+    res.status(200).json(response.data);
+  } catch (error) {
+    console.error(`Error fetching users for ${req.admin?.routerId}:`, error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch users from router' });
+  }
+});
+
+// 4. Fetch Live System Status from Router (Scoped by Admin Token)
+app.get('/api/router/system', verifyAdmin, async (req, res) => {
+  try {
+    const routerId = req.admin.routerId;
+    const config = await getRouterConfig(routerId);
+
+    const baseUrl = config.ipOrDomain;
+    const authHeader = 'Basic ' + Buffer.from(`${config.username}:${config.password}`).toString('base64');
+
+    const response = await axios.get(`http://${baseUrl}/rest/system/resource`, {
+      headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+      timeout: 5000
+    });
+
+    res.status(200).json(response.data);
+  } catch (error) {
+    console.error(`Error fetching system status for ${req.admin?.routerId}:`, error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch system status from router' });
+  }
+});
+
+// 5. Fetch Router Identity / Name (Scoped by Admin Token)
+app.get('/api/router/identity', verifyAdmin, async (req, res) => {
+  try {
+    const routerId = req.admin.routerId;
+    const config = await getRouterConfig(routerId);
+
+    const baseUrl = config.ipOrDomain;
+    const authHeader = 'Basic ' + Buffer.from(`${config.username}:${config.password}`).toString('base64');
+
+    const response = await axios.get(`http://${baseUrl}/rest/system/identity`, {
+      headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+      timeout: 5000
+    });
+
+    return res.json(response.data);
+  } catch (error) {
+    console.error(`Router Identity Fetch Error (${req.admin?.routerId}):`, error.message);
+    return res.status(500).json({ error: error.message, name: req.admin?.routerId || 'Millan_Router' });
+  }
+});
+
+// Dashboard Overview Route
 app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
@@ -448,27 +530,7 @@ app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
 });
 
 // ==========================================
-// ROUTER IDENTITY PROXY ROUTE
-// ==========================================
-app.get('/api/router/identity', async (req, res) => {
-  try {
-    const routerIp = process.env.ROUTER_IP || '192.24.88.1';
-    const response = await axios.get(`http://${routerIp}/rest/system/identity`, {
-      auth: {
-        username: process.env.ROUTER_USER || 'admin',
-        password: process.env.ROUTER_PASSWORD || ''
-      },
-      timeout: 5000
-    });
-    return res.json(response.data);
-  } catch (error) {
-    console.error('Router Identity Fetch Error:', error.message);
-    return res.status(500).json({ error: error.message, name: 'Millan_Router_Default' });
-  }
-});
-
-// ==========================================
-// 7. ADMIN ROUTES (SaaS Management)
+// 7. SUPER-ADMIN ROUTES (SaaS Subscriptions)
 // ==========================================
 app.post('/api/admin/renew-subscription', async (req, res) => {
   const { adminSecret, routerId, daysToAdd } = req.body;
@@ -501,48 +563,6 @@ app.post('/api/admin/renew-subscription', async (req, res) => {
   } catch (err) {
     console.error('Failed to renew subscription:', err);
     res.status(500).json({ error: 'Failed to renew subscription' });
-  }
-});
-
-// ==========================================
-// 8. MIKROTIK ROUTER PROXY API (REAL LIVE MODE)
-// ==========================================
-
-// 1. Fetch Real Hotspot Users from MikroTik
-app.get('/api/router/users', async (req, res) => {
-  try {
-    const response = await axios.get(MIKROTIK_REST_URL, {
-      headers: { 
-        'Authorization': MIKROTIK_AUTH,
-        'Content-Type': 'application/json'
-      },
-      timeout: 5000
-    });
-
-    res.status(200).json(response.data);
-  } catch (error) {
-    console.error("Error fetching router users:", error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to fetch users from router' });
-  }
-});
-
-// 2. Fetch Real System Status from MikroTik
-app.get('/api/router/system', async (req, res) => {
-  try {
-    const resourceUrl = MIKROTIK_REST_URL.replace(/\/ip\/hotspot\/user\/?$/, '/system/resource');
-
-    const response = await axios.get(resourceUrl, {
-      headers: { 
-        'Authorization': MIKROTIK_AUTH,
-        'Content-Type': 'application/json'
-      },
-      timeout: 5000
-    });
-
-    res.status(200).json(response.data);
-  } catch (error) {
-    console.error("Error fetching router system status:", error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to fetch system status from router' });
   }
 });
 
