@@ -81,7 +81,6 @@ async function getRouterConfig(routerId) {
   }
   const routerDoc = await db.collection('routers').doc(routerId).get();
   if (!routerDoc.exists) {
-    // Fallback: try searching by routerId field if doc ID differs
     const snap = await db.collection('routers').where('routerId', '==', routerId).limit(1).get();
     if (snap.empty) {
       throw new Error(`Router configuration for '${routerId}' not found in database.`);
@@ -95,7 +94,6 @@ async function getRouterConfig(routerId) {
 // 3. PUBLIC ROUTES (For package.html)
 // ==========================================
 
-// Fetch Captive Portal Configuration
 app.get('/api/portal-config', async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -153,7 +151,6 @@ app.get('/api/portal-config', async (req, res) => {
   }
 });
 
-// Client Status Check (Polled during payment processing)
 app.get('/api/check-status', async (req, res) => {
   const reference = req.query.reference;
   if (!reference) return res.status(400).json({ ready: false, message: 'Missing reference' });
@@ -171,7 +168,6 @@ app.get('/api/check-status', async (req, res) => {
       });
     }
 
-    // Dynamic router lookup for fallback check
     const routerId = req.query.routerId || 'kisumu_cbd_01';
     let routerConfig;
     try {
@@ -241,7 +237,6 @@ app.post('/api/paystack-webhook', async (req, res) => {
       const generatedPassword = 'pass_' + Math.floor(1000 + Math.random() * 9000);
       const limitUptime = PACKAGE_UPTIME_MAP[packageName] || '24h';
 
-      // 1. Attempt Hotspot User Creation dynamically
       let routerProvisioned = false;
       try {
         await createHotspotUserOnRouter(routerId, reference, generatedPassword, 'default', limitUptime);
@@ -250,7 +245,6 @@ app.post('/api/paystack-webhook', async (req, res) => {
         console.error(`⚠️ Router API call failed (${routerErr.message}). Recording transaction to Firestore anyway...`);
       }
 
-      // 2. Save transaction to Firestore
       const now = new Date();
 
       await db.collection('transactions').doc(reference).set({
@@ -278,7 +272,6 @@ app.post('/api/paystack-webhook', async (req, res) => {
   }
 });
 
-// Dynamic Helper: Create Hotspot User on Target MikroTik Router
 async function createHotspotUserOnRouter(routerId, username, password, profile, limitUptime) {
   const routerConfig = await getRouterConfig(routerId);
   const baseUrl = routerConfig.ipOrDomain;
@@ -332,7 +325,6 @@ const verifyAdmin = (req, res, next) => {
   }
 };
 
-// ADMIN LOGIN ENDPOINT
 app.post('/api/admin/login', async (req, res) => {
   const { username, password } = req.body;
   try {
@@ -362,12 +354,10 @@ app.post('/api/admin/login', async (req, res) => {
 // 6. PROTECTED DASHBOARD & ROUTER PROXY API
 // ==========================================
 
-// 1. Fetch Transactions (Scoped strictly to the logged-in admin's routerId)
 app.get('/api/transactions', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
 
-    // Simple query requiring NO composite index
     const snapshot = await db.collection('transactions')
       .where('routerId', '==', routerId)
       .get();
@@ -385,7 +375,6 @@ app.get('/api/transactions', verifyAdmin, async (req, res) => {
       });
     });
 
-    // 👈 Sort manually in JavaScript (Newest first)
     transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.json({ success: true, data: transactions });
@@ -395,7 +384,6 @@ app.get('/api/transactions', verifyAdmin, async (req, res) => {
   }
 });
 
-// 2. Fetch Revenue Stats (Scoped strictly to the logged-in admin's routerId)
 app.get('/api/revenue-stats', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
@@ -423,7 +411,6 @@ app.get('/api/revenue-stats', verifyAdmin, async (req, res) => {
   }
 });
 
-// 3. Fetch Live Hotspot Users from Router (Scoped by Admin Token)
 app.get('/api/router/users', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
@@ -444,7 +431,6 @@ app.get('/api/router/users', verifyAdmin, async (req, res) => {
   }
 });
 
-// 4. Fetch Live System Status from Router (Scoped by Admin Token)
 app.get('/api/router/system', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
@@ -465,7 +451,6 @@ app.get('/api/router/system', verifyAdmin, async (req, res) => {
   }
 });
 
-// 5. Fetch Router Identity / Name (Scoped by Admin Token)
 app.get('/api/router/identity', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
@@ -486,7 +471,6 @@ app.get('/api/router/identity', verifyAdmin, async (req, res) => {
   }
 });
 
-// Dashboard Overview Route (Optimized to single query & JS sorting)
 app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
@@ -512,7 +496,6 @@ app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
       });
     });
 
-    // 👈 Sort manually and grab the top 10 recent transactions
     allTransactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const recentTransactions = allTransactions.slice(0, 10);
 
@@ -525,4 +508,48 @@ app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
     console.error('Error fetching admin dashboard:', err);
     res.status(500).json({ error: 'Failed to fetch dashboard data' });
   }
+});
+
+// ==========================================
+// 7. SUPER-ADMIN ROUTES (SaaS Subscriptions)
+// ==========================================
+app.post('/api/admin/renew-subscription', async (req, res) => {
+  const { adminSecret, routerId, daysToAdd } = req.body;
+
+  if (adminSecret !== ADMIN_SECRET_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const days = daysToAdd || 30;
+    const newExpiration = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+    const snap = await db.collection('routers').where('routerId', '==', routerId).limit(1).get();
+
+    if (snap.empty) {
+      return res.status(404).json({ error: 'Router not found' });
+    }
+
+    const routerDocRef = snap.docs[0].ref;
+    await routerDocRef.update({
+      systemActive: true,
+      subscriptionEndDate: newExpiration
+    });
+
+    res.json({ 
+      message: `Router ${routerId} renewed successfully until ${newExpiration}`, 
+      routerId, 
+      subscriptionEndDate: newExpiration 
+    });
+  } catch (err) {
+    console.error('Failed to renew subscription:', err);
+    res.status(500).json({ error: 'Failed to renew subscription' });
+  }
+});
+
+// ==========================================
+// 8. SERVER STARTUP LISTENER (Crucial!)
+// ==========================================
+app.listen(PORT, () => {
+  console.log(`🚀 MILLANWIFI SaaS Backend running on port ${PORT}`);
 });
