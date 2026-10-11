@@ -448,6 +448,26 @@ app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
 });
 
 // ==========================================
+// ROUTER IDENTITY PROXY ROUTE
+// ==========================================
+app.get('/api/router/identity', async (req, res) => {
+  try {
+    const routerIp = process.env.ROUTER_IP || '192.24.88.1';
+    const response = await axios.get(`http://${routerIp}/rest/system/identity`, {
+      auth: {
+        username: process.env.ROUTER_USER || 'admin',
+        password: process.env.ROUTER_PASSWORD || ''
+      },
+      timeout: 5000
+    });
+    return res.json(response.data);
+  } catch (error) {
+    console.error('Router Identity Fetch Error:', error.message);
+    return res.status(500).json({ error: error.message, name: 'Millan_Router_Default' });
+  }
+});
+
+// ==========================================
 // 7. ADMIN ROUTES (SaaS Management)
 // ==========================================
 app.post('/api/admin/renew-subscription', async (req, res) => {
