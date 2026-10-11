@@ -362,15 +362,14 @@ app.post('/api/admin/login', async (req, res) => {
 // 6. PROTECTED DASHBOARD & ROUTER PROXY API
 // ==========================================
 
-// 1. Fetch Firestore Transactions (Scoped by Admin Token)
 // 1. Fetch Transactions (Scoped strictly to the logged-in admin's routerId)
 app.get('/api/transactions', verifyAdmin, async (req, res) => {
   try {
-    const routerId = req.admin.routerId; // Extracted safely from JWT token
+    const routerId = req.admin.routerId;
 
+    // Simple query requiring NO composite index
     const snapshot = await db.collection('transactions')
-      .where('routerId', '==', routerId) // 👈 Filter transactions by routerId
-      .orderBy('createdAt', 'desc')
+      .where('routerId', '==', routerId)
       .get();
 
     const transactions = [];
@@ -386,6 +385,9 @@ app.get('/api/transactions', verifyAdmin, async (req, res) => {
       });
     });
 
+    // 👈 Sort manually in JavaScript (Newest first)
+    transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
     return res.json({ success: true, data: transactions });
   } catch (error) {
     console.error(`Error fetching transactions for ${req.admin?.routerId}:`, error.message);
@@ -399,8 +401,8 @@ app.get('/api/revenue-stats', verifyAdmin, async (req, res) => {
     const routerId = req.admin.routerId;
 
     const snapshot = await db.collection('transactions')
+      .where('routerId', '==', routerId)
       .where('status', '==', 'success')
-      .where('routerId', '==', routerId) // 👈 Filter revenue by routerId
       .get();
 
     let totalRevenue = 0;
@@ -484,7 +486,7 @@ app.get('/api/router/identity', verifyAdmin, async (req, res) => {
   }
 });
 
-// Dashboard Overview Route
+// Dashboard Overview Route (Optimized to single query & JS sorting)
 app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
   try {
     const routerId = req.admin.routerId;
@@ -495,28 +497,24 @@ app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
       .get();
 
     let totalRevenue = 0;
+    const allTransactions = [];
+
     snapshot.forEach(doc => {
-      totalRevenue += (doc.data().amount || 0);
-    });
-
-    const recentSnap = await db.collection('transactions')
-      .where('routerId', '==', routerId)
-      .where('status', '==', 'success')
-      .orderBy('createdAt', 'desc')
-      .limit(10)
-      .get();
-
-    const recentTransactions = recentSnap.docs.map(doc => {
       const d = doc.data();
-      return {
+      totalRevenue += Number(d.amount || 0);
+      allTransactions.push({
         id: doc.id,
         reference: d.reference,
         amount: d.amount,
         packageName: d.packageName,
         hotspotUsername: d.hotspotUsername,
         createdAt: d.createdAt?.toDate ? d.createdAt.toDate() : d.createdAt
-      };
+      });
     });
+
+    // 👈 Sort manually and grab the top 10 recent transactions
+    allTransactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    const recentTransactions = allTransactions.slice(0, 10);
 
     res.json({
       totalRevenue,
@@ -527,46 +525,4 @@ app.get('/api/admin/dashboard', verifyAdmin, async (req, res) => {
     console.error('Error fetching admin dashboard:', err);
     res.status(500).json({ error: 'Failed to fetch dashboard data' });
   }
-});
-
-// ==========================================
-// 7. SUPER-ADMIN ROUTES (SaaS Subscriptions)
-// ==========================================
-app.post('/api/admin/renew-subscription', async (req, res) => {
-  const { adminSecret, routerId, daysToAdd } = req.body;
-
-  if (adminSecret !== ADMIN_SECRET_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  try {
-    const days = daysToAdd || 30;
-    const newExpiration = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-
-    const snap = await db.collection('routers').where('routerId', '==', routerId).limit(1).get();
-
-    if (snap.empty) {
-      return res.status(404).json({ error: 'Router not found' });
-    }
-
-    const routerDocRef = snap.docs[0].ref;
-    await routerDocRef.update({
-      systemActive: true,
-      subscriptionEndDate: newExpiration
-    });
-
-    res.json({ 
-      message: `Router ${routerId} renewed successfully until ${newExpiration}`, 
-      routerId, 
-      subscriptionEndDate: newExpiration 
-    });
-  } catch (err) {
-    console.error('Failed to renew subscription:', err);
-    res.status(500).json({ error: 'Failed to renew subscription' });
-  }
-});
-
-// Start Server
-app.listen(PORT, () => {
-  console.log(`🚀 MILLANWIFI SaaS Backend running on port ${PORT}`);
 });
