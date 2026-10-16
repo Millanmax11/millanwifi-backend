@@ -24,12 +24,9 @@ app.use(express.json({
   }
 }));
 
-// Add this to your server.js
-app.get('/', (req, res) => {
-  res.status(200).json({ 
-    success: true, 
-    message: '🚀 MILLANWIFI SaaS Backend is live and running!' 
-  });
+// Lightweight keep-alive endpoint
+app.get('/ping', (req, res) => {
+  res.status(200).send('OK');
 });
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
