@@ -24,6 +24,14 @@ app.use(express.json({
   }
 }));
 
+// Add this to your server.js
+app.get('/', (req, res) => {
+  res.status(200).json({ 
+    success: true, 
+    message: '🚀 MILLANWIFI SaaS Backend is live and running!' 
+  });
+});
+
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const JWT_SECRET = process.env.JWT_SECRET || 'millanwifi_admin_secret_key';
 const ADMIN_SECRET_KEY = process.env.ADMIN_SECRET_KEY || 'supersecret123';
